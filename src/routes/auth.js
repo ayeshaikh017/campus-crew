@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 
 import User from '../models/User.js';
@@ -10,6 +9,7 @@ import { makeOtp, hashText, safeCompare } from '../utils/otp.js';
 import { sendOtp } from '../utils/mailer.js';
 import { requireAuth } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
+import { signSession, COOKIE_NAME } from '../utils/session.js';
 
 const router = Router();
 
@@ -45,7 +45,6 @@ const otpSchema = z.object({
 // Locally both run on "localhost", so SameSite=Lax works fine.
 // ---------------------------------------------------------------------------
 const isProd = process.env.NODE_ENV === 'production';
-const COOKIE_NAME = process.env.COOKIE_NAME || 'campuscrew_token';
 
 const baseCookieOptions = () => ({
   httpOnly: true,
@@ -59,14 +58,17 @@ const cookieOptions = () => ({
   maxAge: 7 * 24 * 60 * 60 * 1000,
 });
 
-function setSession(res, user) {
-  const token = jwt.sign(
-    { sub: user.id, ver: user.tokenVersion },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
-  );
+function setSession(res, user, opts) {
+  const token = signSession(user, opts);
   res.cookie(COOKIE_NAME, token, cookieOptions());
+  return token;
 }
+
+const publicUser = (user, extra = {}) => ({
+  ...user.toJSON(),
+  roleSelected: user.role === 'admin',
+  ...extra,
+});
 
 // ---------------------------------------------------------------------------
 // OTP helper
@@ -130,22 +132,20 @@ router.post(
     }
 
     const passwordHash = await bcrypt.hash(password, 12);
-    await User.create({
+    // No OTP step: the account is active immediately and the user is logged in.
+    const user = await User.create({
       name,
       collegeId,
       collegeEmail,
       passwordHash,
       department,
       academicYear,
+      isEmailVerified: true,
+      accountStatus: 'active',
     });
-    await issueOtp(collegeEmail, 'register');
 
-    ok(
-      res,
-      { email: collegeEmail },
-      'Registration received. Verify your college email to activate your account.',
-      201
-    );
+    const token = setSession(res, user, { role: user.role, roleSelected: false });
+    ok(res, { user: publicUser(user), token }, 'Account created', 201);
   })
 );
 
@@ -181,8 +181,8 @@ router.post(
     );
     if (!user) throw new AppError(404, 'Account not found');
 
-    setSession(res, user);
-    ok(res, { user }, 'Email verified');
+    const token = setSession(res, user, { role: user.role, roleSelected: false });
+    ok(res, { user: publicUser(user), token }, 'Email verified');
   })
 );
 
@@ -218,6 +218,12 @@ router.post(
       throw new AppError(401, 'Invalid email or password');
     }
 
+    if (!user.isEmailVerified && user.accountStatus === 'pending') {
+      user.isEmailVerified = true;
+      user.accountStatus = 'active';
+      await user.save();
+    }
+
     if (!user.isEmailVerified || user.accountStatus !== 'active') {
       throw new AppError(
         403,
@@ -225,27 +231,17 @@ router.post(
       );
     }
 
-    setSession(res, user);
-    ok(res, { user: user.toJSON() }, 'Login successful');
+    // roleSelected is false on every fresh login, so the student/teacher chooser shows.
+    const token = setSession(res, user, { role: user.role, roleSelected: false });
+    ok(res, { user: publicUser(user), token }, 'Login successful');
   })
 );
 
 router.post(
   '/logout',
-  asyncHandler(async (req, res) => {
-    const token = req.cookies?.[COOKIE_NAME];
-
-    if (token) {
-      try {
-        const payload = jwt.verify(token, process.env.JWT_SECRET);
-        await User.findByIdAndUpdate(payload.sub, { $inc: { tokenVersion: 1 } });
-      } catch {
-        // Invalid or expired token: nothing to revoke, still clear the cookie.
-      }
-    }
-
-    // Options must match the ones used when the cookie was set,
-    // otherwise the browser will not remove it.
+  asyncHandler(async (_req, res) => {
+    // Tokens live on the device; logging out here only clears this device's session.
+    // (Bumping tokenVersion would sign the user out of every other device too.)
     res.clearCookie(COOKIE_NAME, baseCookieOptions());
     ok(res, null, 'Logged out');
   })
@@ -254,7 +250,42 @@ router.post(
 router.get(
   '/me',
   requireAuth,
-  asyncHandler(async (req, res) => ok(res, { user: req.user.toJSON() }))
+  asyncHandler(async (req, res) =>
+    ok(res, { user: { ...req.user.toJSON(), roleSelected: req.roleSelected } })
+  )
+);
+
+// Choose how to use the app for this login: student or teacher.
+// Teacher needs TEACHER_ACCESS_CODE (first time only), otherwise any student could
+// pick "teacher" and see every volunteer and write tasks for them.
+router.post(
+  '/select-role',
+  requireAuth,
+  validate(z.object({ role: z.enum(['student', 'teacher']), accessCode: z.string().max(100).optional() })),
+  asyncHandler(async (req, res) => {
+    const user = req.user;
+    const dbRole = user.$locals.dbRole;
+    if (dbRole === 'admin') {
+      return ok(res, { user: publicUser(user), token: setSession(res, user, { role: 'admin', roleSelected: true }) }, 'Admin');
+    }
+    let role = 'volunteer';
+    if (req.body.role === 'teacher') {
+      const alreadyTeacher = dbRole === 'coordinator' || user.isTeacher === true;
+      if (!alreadyTeacher) {
+        const expected = process.env.TEACHER_ACCESS_CODE;
+        if (!expected) {
+          if (isProd) throw new AppError(403, 'Teacher sign-in is not configured yet. Set TEACHER_ACCESS_CODE on the server.');
+        } else if (!safeCompare(hashText(req.body.accessCode || ''), hashText(expected))) {
+          throw new AppError(403, 'Incorrect teacher access code');
+        }
+        await User.updateOne({ _id: user.id }, { $set: { isTeacher: true } });
+        user.isTeacher = true;
+      }
+      role = 'coordinator';
+    }
+    const token = setSession(res, user, { role, roleSelected: true });
+    ok(res, { user: publicUser(user, { role, roleSelected: true }), token }, 'Role selected');
+  })
 );
 
 router.post(

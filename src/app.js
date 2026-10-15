@@ -12,6 +12,8 @@ import taskRoutes from './routes/tasks.js';
 import notificationRoutes from './routes/notifications.js';
 import chatRoutes from './routes/chat.js';
 import adminRoutes from './routes/admin.js';
+import volunteerRoutes from './routes/volunteers.js';
+import { allowedOrigins } from './config/origins.js';
 import { notFound, errorHandler } from './middleware/errors.js';
 
 const app = express();
@@ -24,16 +26,6 @@ app.set('trust proxy', 1);
 
 app.use(helmet());
 
-// Accepts CLIENT_ORIGIN (preferred) or CLIENT_URL. Comma-separate multiple origins.
-// Trailing slashes are stripped because browsers never send them in the Origin header.
-const allowedOrigins = (
-  process.env.CLIENT_ORIGIN ||
-  process.env.CLIENT_URL ||
-  'http://localhost:5173'
-)
-  .split(',')
-  .map((s) => s.trim().replace(/\/+$/, ''))
-  .filter(Boolean);
 console.log('ALLOWED ORIGINS:', allowedOrigins);
 app.use(
   cors({
@@ -64,6 +56,8 @@ const authLimiter = rateLimit({
   limit: 50,
   standardHeaders: true,
   legacyHeaders: false,
+  // /me is called on every page load; campus Wi-Fi shares one IP, so don't count it.
+  skip: (req) => req.path === '/me' || req.path === '/logout',
   message: {
     success: false,
     message: 'Too many requests. Please try again later.',
@@ -79,6 +73,7 @@ app.use('/api/v1/tasks', taskRoutes);
 app.use('/api/v1/notifications', notificationRoutes);
 app.use('/api/v1/chat', chatRoutes);
 app.use('/api/v1/admin', adminRoutes);
+app.use('/api/v1/volunteers', volunteerRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

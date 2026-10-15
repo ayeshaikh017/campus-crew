@@ -8,6 +8,7 @@ const userSchema = new mongoose.Schema({
   department: { type: String, default: '', maxlength: 100 },
   academicYear: { type: String, default: '', maxlength: 30 },
   skills: { type: [String], default: [] }, bio: { type: String, default: '', maxlength: 600 }, avatarUrl: { type: String, default: '' },
+  isTeacher: { type: Boolean, default: false },
   isEmailVerified: { type: Boolean, default: false }, accountStatus: { type: String, enum: ['pending','active','suspended'], default: 'pending' }, tokenVersion: { type: Number, default: 0 }
 }, { timestamps: true, toJSON: { transform(_doc, ret) { delete ret.passwordHash; delete ret.__v; return ret; } } });
 userSchema.index({ collegeEmail: 1 }, { unique: true }); userSchema.index({ collegeId: 1 }, { unique: true });
