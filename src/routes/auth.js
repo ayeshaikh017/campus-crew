@@ -9,7 +9,7 @@ import { makeOtp, hashText, safeCompare } from '../utils/otp.js';
 import { sendOtp } from '../utils/mailer.js';
 import { requireAuth } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
-import { signSession, COOKIE_NAME } from '../utils/session.js';
+import { signSession, COOKIE_NAME, isStaffUser } from '../utils/session.js';
 
 const router = Router();
 
@@ -108,7 +108,15 @@ async function issueOtp(email, purpose) {
     });
   }
 
-  await sendOtp(email, otp, purpose);
+  try {
+    await sendOtp(email, otp, purpose);
+  } catch (err) {
+    // Email failed: don't make the user wait out the resend cooldown for a mail
+    // that was never sent, and tell them clearly instead of a fake "code sent".
+    record.lastSentAt = new Date(0);
+    await record.save().catch(() => {});
+    throw new AppError(503, 'We could not send the email right now. Please try again in a minute.');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +375,71 @@ router.post(
     await user.save();
 
     ok(res, null, 'Password reset successful. Please log in again');
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Simple forgot-password (no email / SMS needed)
+// The user proves who they are with details only they should know together:
+// registered email + college ID + full name. Teacher/admin accounts must also
+// give the teacher access code. Wrong attempts are limited per email.
+// ---------------------------------------------------------------------------
+const resetFails = new Map(); // email -> { count, firstAt }
+const RESET_MAX_FAILS = 5;
+const RESET_WINDOW_MS = 15 * 60 * 1000;
+const norm = (v) => String(v || '').trim().replace(/\s+/g, ' ').toLowerCase();
+
+function checkResetLock(email) {
+  const rec = resetFails.get(email);
+  if (!rec) return;
+  if (Date.now() - rec.firstAt > RESET_WINDOW_MS) return resetFails.delete(email);
+  if (rec.count >= RESET_MAX_FAILS) {
+    throw new AppError(429, 'Too many wrong attempts. Please try again after 15 minutes');
+  }
+}
+function recordResetFail(email) {
+  const rec = resetFails.get(email);
+  if (!rec || Date.now() - rec.firstAt > RESET_WINDOW_MS) resetFails.set(email, { count: 1, firstAt: Date.now() });
+  else rec.count++;
+}
+
+router.post(
+  '/reset-password-direct',
+  validate(
+    z.object({
+      email: emailSchema,
+      collegeId: z.string().trim().min(2).max(40),
+      name: z.string().trim().min(2).max(80),
+      teacherCode: z.string().max(100).optional(),
+      newPassword: z.string().min(8).max(72),
+    })
+  ),
+  asyncHandler(async (req, res) => {
+    const { email, collegeId, name, teacherCode = '', newPassword } = req.body;
+    checkResetLock(email);
+
+    const fail = () => {
+      recordResetFail(email);
+      throw new AppError(400, 'The details you entered do not match our records');
+    };
+
+    const user = await User.findOne({ collegeEmail: email });
+    if (!user || norm(user.collegeId) !== norm(collegeId) || norm(user.name) !== norm(name)) fail();
+
+    if (isStaffUser(user)) {
+      const expected = process.env.TEACHER_ACCESS_CODE;
+      if (!expected || !safeCompare(hashText(teacherCode), hashText(expected))) {
+        recordResetFail(email);
+        throw new AppError(403, 'Teacher accounts need the correct teacher access code to reset the password');
+      }
+    }
+
+    user.passwordHash = await bcrypt.hash(newPassword, 12);
+    user.tokenVersion++; // logs the account out everywhere else
+    await user.save();
+    resetFails.delete(email);
+
+    ok(res, null, 'Password reset successful. Please log in with your new password');
   })
 );
 
