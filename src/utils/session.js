@@ -7,7 +7,7 @@ export const COOKIE_NAME = process.env.COOKIE_NAME || 'campuscrew_token';
 export const isStaffUser = (u) =>
   ['coordinator', 'admin'].includes(u?.role) || u?.isTeacher === true;
 
-// role: 'volunteer' (student) | 'coordinator' (teacher) | 'admin'
+// role: 'volunteer' (student) | 'coordinator' (teacher). Old 'admin' accounts are treated as teachers.
 export function signSession(user, { role, roleSelected = false } = {}) {
   return jwt.sign(
     { sub: user.id, ver: user.tokenVersion, role: role || user.role, rs: roleSelected ? 1 : 0 },
@@ -31,10 +31,8 @@ export async function resolveSession(token) {
   }
   const dbRole = user.role;
   user.$locals.dbRole = dbRole;
-  if (dbRole !== 'admin' && payload.role) {
-    // A token can never grant more than the user is allowed to be.
-    const mayTeach = dbRole === 'coordinator' || user.isTeacher === true;
-    user.role = payload.role === 'coordinator' && mayTeach ? 'coordinator' : 'volunteer';
-  }
-  return { user, roleSelected: dbRole === 'admin' || payload.rs === 1 };
+  // A token can never grant more than the user is allowed to be.
+  const mayTeach = dbRole === 'coordinator' || dbRole === 'admin' || user.isTeacher === true;
+  user.role = payload.role === 'coordinator' && mayTeach ? 'coordinator' : 'volunteer';
+  return { user, roleSelected: payload.rs === 1 };
 }

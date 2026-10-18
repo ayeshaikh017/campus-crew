@@ -21,7 +21,7 @@ import { notify } from '../utils/notify.js';
 const router = Router();
 router.use(requireAuth);
 
-const isTeacher = (user) => ['admin', 'coordinator'].includes(user?.role);
+const isTeacher = (user) => user?.role === 'coordinator';
 const emitTeachers = (name, data) => globalThis.campusCrewIo?.to('teachers').emit(name, data);
 
 // Events created before this change may be stuck as "draft"/"pending_approval".
@@ -73,13 +73,32 @@ router.get(
       .limit(200)
       .populate('createdBy', 'name')
       .populate('coordinatorIds', 'name');
-    ok(res, { events });
+
+    // Teachers also get people counts for each event (used by the Manage campus page).
+    let counts = new Map();
+    if (isTeacher(req.user) && events.length) {
+      const rows = await Registration.aggregate([
+        { $match: { eventId: { $in: events.map((e) => e._id) }, status: { $in: ['pending', 'approved'] } } },
+        { $group: { _id: { eventId: '$eventId', type: '$type', status: '$status' }, n: { $sum: 1 } } },
+      ]);
+      for (const r of rows) {
+        const key = String(r._id.eventId);
+        const c = counts.get(key) || { volunteers: 0, participants: 0, pending: 0 };
+        if (r._id.type === 'participant') c.participants += r.n;
+        else if (r._id.status === 'approved') c.volunteers += r.n;
+        else c.pending += r.n;
+        counts.set(key, c);
+      }
+    }
+    ok(res, {
+      events: events.map((e) => ({ ...e.toObject(), counts: counts.get(String(e._id)) || { volunteers: 0, participants: 0, pending: 0 } })),
+    });
   })
 );
 
 router.post(
   '/',
-  allowRoles('admin', 'coordinator'),
+  allowRoles('coordinator'),
   validate(eventInput),
   asyncHandler(async (req, res) => {
     if (req.body.endDate < req.body.startDate) throw new AppError(400, 'End time must be after the start time');
@@ -106,7 +125,7 @@ router.get(
 
 router.patch(
   '/:id',
-  allowRoles('admin', 'coordinator'),
+  allowRoles('coordinator'),
   validate(eventInput.partial()),
   asyncHandler(async (req, res) => {
     const event = await loadEvent(req.params.id, req.user);
@@ -119,7 +138,7 @@ router.patch(
 // Kept for older clients. Approving publishes, rejecting cancels.
 router.post(
   '/:id/decision',
-  allowRoles('admin', 'coordinator'),
+  allowRoles('coordinator'),
   validate(z.object({ decision: z.enum(['approve', 'reject']) })),
   asyncHandler(async (req, res) => {
     const event = await loadEvent(req.params.id, req.user);
@@ -188,7 +207,7 @@ router.delete(
 
 router.get(
   '/:id/registrations',
-  allowRoles('admin', 'coordinator'),
+  allowRoles('coordinator'),
   asyncHandler(async (req, res) => {
     const event = await loadEvent(req.params.id, req.user);
     const rows = await Registration.find({ eventId: event.id, status: { $in: ['pending', 'approved', 'rejected'] } })
@@ -206,7 +225,7 @@ router.get(
 // Teacher adds a student straight to the event (the "Add participant" / "Add volunteer" buttons).
 router.post(
   '/:id/members',
-  allowRoles('admin', 'coordinator'),
+  allowRoles('coordinator'),
   validate(
     z.object({
       userId: z.string().min(1),
@@ -251,7 +270,7 @@ router.post(
 // Teacher approves / rejects an application.
 router.patch(
   '/:id/registrations/:registrationId',
-  allowRoles('admin', 'coordinator'),
+  allowRoles('coordinator'),
   validate(
     z.object({
       decision: z.enum(['approve', 'reject']),
@@ -286,7 +305,7 @@ router.patch(
 // Teacher removes someone from the event.
 router.delete(
   '/:id/members/:registrationId',
-  allowRoles('admin', 'coordinator'),
+  allowRoles('coordinator'),
   asyncHandler(async (req, res) => {
     const event = await loadEvent(req.params.id, req.user);
     const r = await Registration.findOne({ _id: req.params.registrationId, eventId: event.id });
@@ -306,7 +325,7 @@ router.delete(
 
 router.post(
   '/:id/assignments',
-  allowRoles('admin', 'coordinator'),
+  allowRoles('coordinator'),
   validate(z.object({ volunteerId: z.string(), workRole: z.string().trim().min(2).max(100), responsibilities: z.array(z.string().max(250)).max(30).optional() })),
   asyncHandler(async (req, res) => {
     const event = await loadEvent(req.params.id, req.user);

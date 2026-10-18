@@ -11,7 +11,6 @@ import eventRoutes from './routes/events.js';
 import taskRoutes from './routes/tasks.js';
 import notificationRoutes from './routes/notifications.js';
 import chatRoutes from './routes/chat.js';
-import adminRoutes from './routes/admin.js';
 import volunteerRoutes from './routes/volunteers.js';
 import { allowedOrigins } from './config/origins.js';
 import { notFound, errorHandler } from './middleware/errors.js';
@@ -72,7 +71,6 @@ app.use('/api/v1/events', eventRoutes);
 app.use('/api/v1/tasks', taskRoutes);
 app.use('/api/v1/notifications', notificationRoutes);
 app.use('/api/v1/chat', chatRoutes);
-app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/volunteers', volunteerRoutes);
 
 app.use(notFound);

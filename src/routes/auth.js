@@ -66,7 +66,7 @@ function setSession(res, user, opts) {
 
 const publicUser = (user, extra = {}) => ({
   ...user.toJSON(),
-  roleSelected: user.role === 'admin',
+  roleSelected: false,
   ...extra,
 });
 
@@ -227,7 +227,7 @@ router.post(
     if (!user.isEmailVerified || user.accountStatus !== 'active') {
       throw new AppError(
         403,
-        'Verify your college email or contact an administrator'
+        'Verify your college email first'
       );
     }
 
@@ -265,12 +265,9 @@ router.post(
   asyncHandler(async (req, res) => {
     const user = req.user;
     const dbRole = user.$locals.dbRole;
-    if (dbRole === 'admin') {
-      return ok(res, { user: publicUser(user), token: setSession(res, user, { role: 'admin', roleSelected: true }) }, 'Admin');
-    }
     let role = 'volunteer';
     if (req.body.role === 'teacher') {
-      const alreadyTeacher = dbRole === 'coordinator' || user.isTeacher === true;
+      const alreadyTeacher = dbRole === 'coordinator' || dbRole === 'admin' || user.isTeacher === true;
       if (!alreadyTeacher) {
         const expected = process.env.TEACHER_ACCESS_CODE;
         if (!expected) {
