@@ -2,6 +2,7 @@
   "name": "campuscrew-backend",
   "version": "1.0.0",
   "private": true,
+  "license": "UNLICENSED",
   "description": "CampusCrew volunteer and event coordination API",
   "type": "module",
   "engines": { "node": ">=20.0.0" },
